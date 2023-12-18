@@ -75,13 +75,12 @@ def run_epoch(model, dataloader, epoch, optimizer=None, scheduler=None):
         acc = (logits.argmax(dim=1) == y).float().mean()
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(acc.item(), x.size(0))
-        if epoch % 10 == 0:
-            if optimizer:
-                loader_bar.set_description("Train epoch {}, loss: {:.4f}, acc: {:.4f}"
-                                        .format(epoch, loss_meter.avg, acc_meter.avg))
-            else:
-                loader_bar.set_description("Test epoch {}, loss: {:.4f}, acc: {:.4f}"
-                                        .format(epoch, loss_meter.avg, acc_meter.avg))
+        if optimizer:
+            loader_bar.set_description("Train epoch {}, loss: {:.4f}, acc: {:.4f}"
+                                       .format(epoch, loss_meter.avg, acc_meter.avg))
+        else:
+            loader_bar.set_description("Test epoch {}, loss: {:.4f}, acc: {:.4f}"
+                                       .format(epoch, loss_meter.avg, acc_meter.avg))
 
     return loss_meter.avg, acc_meter.avg
 
@@ -91,38 +90,27 @@ def get_lr(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
 
-#@hydra.main(config_name='simclr_config.yml',config_path='.')
-def finetune(batch_size, label_proportion) -> None:
+@hydra.main(config_name='simclr_config.yml')
+def finetune(args: DictConfig) -> None:
     train_transform = transforms.Compose([transforms.RandomResizedCrop(32),
                                           transforms.RandomHorizontalFlip(p=0.5),
                                           transforms.ToTensor()])
     test_transform = transforms.ToTensor()
 
-    data_dir = hydra.utils.to_absolute_path('data')
+    data_dir = hydra.utils.to_absolute_path(args.data_dir)
     train_set = CIFAR10(root=data_dir, train=True, transform=train_transform, download=False)
     test_set = CIFAR10(root=data_dir, train=False, transform=test_transform, download=False)
 
     n_classes = 10
-    # indices = np.random.choice(len(train_set), int(60000*label_proportion), replace=False)
-    # sampler = SubsetRandomSampler(indices)
-    train_loader = DataLoader(train_set, batch_size=batch_size, drop_last=True)#sampler = sampler
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
+    indices = np.random.choice(len(train_set), 10*n_classes, replace=False)
+    sampler = SubsetRandomSampler(indices)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, drop_last=True)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
 
     # Prepare model
-    base_encoder = eval('resnet18')
-    pre_model = SimCLR(base_encoder, projection_dim=128).cuda()
-    #pre_model.load_state_dict(torch.load('./logs/SimCLR/cifar10/simclr_{}_epoch{}_batch{}.pt'.format('resnet18', epoch_size, batch_size)))
-    saved_state_dict = torch.load('./logs/SimCLR/cifar10/simclr_finetune_resnet18_label{}_batch{}.pt'.format(label_proportion, batch_size))
-    # adapted_state_dict = {}
-    # print(saved_state_dict)
-    # for key, value in saved_state_dict.items():
-    #     if key.startswith('enc.'):
-    #         adapted_key = key.replace('enc.', '')
-    #         adapted_state_dict[adapted_key] = value
-
-# Load the adapted state_dict
-    pre_model.enc.load_state_dict(saved_state_dict)
-    #pre_model.load_state_dict(torch.load('./logs/SimCLR/cifar10/simclr_finetune_resnet18_label{}_batch{}.pt'.format(label_proportion, batch_size)))
+    base_encoder = eval(args.backbone)
+    pre_model = SimCLR(base_encoder, projection_dim=args.projection_dim).cuda()
+    pre_model.load_state_dict(torch.load('simclr_{}_epoch{}.pt'.format(args.backbone, args.load_epoch)))
     model = LinModel(pre_model.enc, feature_dim=pre_model.feature_dim, n_classes=len(train_set.targets))
     model = model.cuda()
 
@@ -133,43 +121,35 @@ def finetune(batch_size, label_proportion) -> None:
 
     optimizer = torch.optim.SGD(
         parameters,
-        0.1 * batch_size / 256,   # lr = 0.1 * batch_size / 256, see section B.6 and B.7 of SimCLR paper.
-        momentum=0.9,
+        0.2,   # lr = 0.1 * batch_size / 256, see section B.6 and B.7 of SimCLR paper.
+        momentum=args.momentum,
         weight_decay=0.,
         nesterov=True)
-    
-    learning_rate = 0.15
+
     # cosine annealing lr
     scheduler = LambdaLR(
         optimizer,
         lr_lambda=lambda step: get_lr(  # pylint: disable=g-long-lambda
             step,
-            #epoch_size * len(train_loader),
-            500 * len(train_loader),
-            0.3 * batch_size / 256,  # lr_lambda computes multiplicative factor
+            args.epochs * len(train_loader),
+            args.learning_rate,  # lr_lambda computes multiplicative factor
             1e-3))
 
     optimal_loss, optimal_acc = 1e5, 0.
-    for epoch in range(1, 70 + 1):
+    for epoch in range(1, args.finetune_epochs + 1):
         train_loss, train_acc = run_epoch(model, train_loader, epoch, optimizer, scheduler)
         test_loss, test_acc = run_epoch(model, test_loader, epoch)
 
         if train_loss < optimal_loss:
             optimal_loss = train_loss
-            #optimal_acc = test_acc
-            #logger.info("==> New best results")
-            torch.save(model.state_dict(), './logs/SimCLR/cifar10/simclr_finetune_lin_{}_batch{}_label{}.pth'.format('resnet18', batch_size, label_proportion))
-        if optimal_acc < test_acc:
             optimal_acc = test_acc
-    print("Best Test Acc with label{}, batch{}: {:.4f}".format(label_proportion, batch_size, optimal_acc))
+            logger.info("==> New best results")
+            torch.save(model.state_dict(), 'simclr_lin_{}_best.pth'.format(args.backbone))
+
+    logger.info("Best Test Acc: {:.4f}".format(optimal_acc))
 
 
 if __name__ == '__main__':
-    #epoch_list = [500, 200, 250, 300, 350, 400, 450, 50, 100, 150]#
-    label_proportions = [1.0]#1.0, 0.01, 0.1, 0.3, 0.5
-    batch_list = [256, 128, 64]#
-    for batch in batch_list:
-        for proportion in label_proportions:
-            finetune(batch_size=batch, label_proportion = proportion)
+    finetune()
 
 

@@ -16,6 +16,7 @@ from torchvision import transforms
 
 from models import SimCLR
 from tqdm import tqdm
+import pandas as pd
 
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,9 @@ def get_color_distortion(s=0.5):  # 0.5 for CIFAR10 by default
     return color_distort
 
 
-@hydra.main(config_path='simclr_config.yml')
+@hydra.main(config_name='simclr_config.yml')
 def train(args: DictConfig) -> None:
+    loss_list = []
     assert torch.cuda.is_available()
     cudnn.benchmark = True
 
@@ -143,11 +145,14 @@ def train(args: DictConfig) -> None:
 
             loss_meter.update(loss.item(), x.size(0))
             train_bar.set_description("Train epoch {}, SimCLR loss: {:.4f}".format(epoch, loss_meter.avg))
-
+        loss_list.append(loss_meter.avg)
         # save checkpoint very log_interval epochs
         if epoch >= args.log_interval and epoch % args.log_interval == 0:
             logger.info("==> Save checkpoint. Train epoch {}, SimCLR loss: {:.4f}".format(epoch, loss_meter.avg))
-            torch.save(model.state_dict(), 'simclr_{}_epoch{}.pt'.format(args.backbone, epoch))
+            torch.save(model.state_dict(), 'simclr_{}_epoch{}_batch{}.pt'.format(args.backbone, epoch, args.batch_size))
+    dict = {'epoch': range(1, args.epochs+1), 'loss': loss_list}  
+    df = pd.DataFrame(dict)
+    df.to_csv(f'simclr_{args.backbone}_epoch{args.epochs}_batch{args.batch_size}.csv', index=False)
 
 
 if __name__ == '__main__':

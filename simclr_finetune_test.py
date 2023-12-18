@@ -75,13 +75,12 @@ def run_epoch(model, dataloader, epoch, optimizer=None, scheduler=None):
         acc = (logits.argmax(dim=1) == y).float().mean()
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(acc.item(), x.size(0))
-        if epoch % 10 == 0:
-            if optimizer:
-                loader_bar.set_description("Train epoch {}, loss: {:.4f}, acc: {:.4f}"
-                                        .format(epoch, loss_meter.avg, acc_meter.avg))
-            else:
-                loader_bar.set_description("Test epoch {}, loss: {:.4f}, acc: {:.4f}"
-                                        .format(epoch, loss_meter.avg, acc_meter.avg))
+        if optimizer:
+            loader_bar.set_description("Train epoch {}, loss: {:.4f}, acc: {:.4f}"
+                                       .format(epoch, loss_meter.avg, acc_meter.avg))
+        else:
+            loader_bar.set_description("Test epoch {}, loss: {:.4f}, acc: {:.4f}"
+                                       .format(epoch, loss_meter.avg, acc_meter.avg))
 
     return loss_meter.avg, acc_meter.avg
 
@@ -91,43 +90,32 @@ def get_lr(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
 
-#@hydra.main(config_name='simclr_config.yml',config_path='.')
+#@hydra.main(config_name='simclr_config_finetune.yml')
 def finetune(batch_size, label_proportion) -> None:
     train_transform = transforms.Compose([transforms.RandomResizedCrop(32),
                                           transforms.RandomHorizontalFlip(p=0.5),
                                           transforms.ToTensor()])
     test_transform = transforms.ToTensor()
 
-    data_dir = hydra.utils.to_absolute_path('data')
-    train_set = CIFAR10(root=data_dir, train=True, transform=train_transform, download=False)
-    test_set = CIFAR10(root=data_dir, train=False, transform=test_transform, download=False)
+    train_set = CIFAR10(root='./data', train=True, transform=train_transform, download=False)
+    test_set = CIFAR10(root='./data', train=False, transform=test_transform, download=False)
 
     n_classes = 10
-    # indices = np.random.choice(len(train_set), int(60000*label_proportion), replace=False)
-    # sampler = SubsetRandomSampler(indices)
-    train_loader = DataLoader(train_set, batch_size=batch_size, drop_last=True)#sampler = sampler
+    #indices = np.random.choice(len(train_set), int(60000*label_proportion), replace=False)
+    #sampler = SubsetRandomSampler(indices)
+    train_loader = DataLoader(train_set, batch_size=batch_size, drop_last=True)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
 
     # Prepare model
     base_encoder = eval('resnet18')
     pre_model = SimCLR(base_encoder, projection_dim=128).cuda()
-    #pre_model.load_state_dict(torch.load('./logs/SimCLR/cifar10/simclr_{}_epoch{}_batch{}.pt'.format('resnet18', epoch_size, batch_size)))
-    saved_state_dict = torch.load('./logs/SimCLR/cifar10/simclr_finetune_resnet18_label{}_batch{}.pt'.format(label_proportion, batch_size))
-    # adapted_state_dict = {}
-    # print(saved_state_dict)
-    # for key, value in saved_state_dict.items():
-    #     if key.startswith('enc.'):
-    #         adapted_key = key.replace('enc.', '')
-    #         adapted_state_dict[adapted_key] = value
-
-# Load the adapted state_dict
-    pre_model.enc.load_state_dict(saved_state_dict)
-    #pre_model.load_state_dict(torch.load('./logs/SimCLR/cifar10/simclr_finetune_resnet18_label{}_batch{}.pt'.format(label_proportion, batch_size)))
+    pre_model.load_state_dict(torch.load('./logs/SimCLR/cifar10/simclr_resnet18_epoch500_batch{}.pt'.format(batch_size)))
     model = LinModel(pre_model.enc, feature_dim=pre_model.feature_dim, n_classes=len(train_set.targets))
     model = model.cuda()
 
     # Fix encoder
-    model.enc.requires_grad = False
+    model.enc.requires_grad = True
+    #print(model.parameters)
     parameters = [param for param in model.parameters() if param.requires_grad is True]  # trainable parameters.
     # optimizer = Adam(parameters, lr=0.001)
 
@@ -137,39 +125,35 @@ def finetune(batch_size, label_proportion) -> None:
         momentum=0.9,
         weight_decay=0.,
         nesterov=True)
-    
-    learning_rate = 0.15
+
     # cosine annealing lr
     scheduler = LambdaLR(
         optimizer,
         lr_lambda=lambda step: get_lr(  # pylint: disable=g-long-lambda
             step,
-            #epoch_size * len(train_loader),
             500 * len(train_loader),
             0.3 * batch_size / 256,  # lr_lambda computes multiplicative factor
             1e-3))
 
     optimal_loss, optimal_acc = 1e5, 0.
-    for epoch in range(1, 70 + 1):
+    for epoch in range(1, 50 + 1):
         train_loss, train_acc = run_epoch(model, train_loader, epoch, optimizer, scheduler)
         test_loss, test_acc = run_epoch(model, test_loader, epoch)
 
         if train_loss < optimal_loss:
             optimal_loss = train_loss
-            #optimal_acc = test_acc
-            #logger.info("==> New best results")
-            torch.save(model.state_dict(), './logs/SimCLR/cifar10/simclr_finetune_lin_{}_batch{}_label{}.pth'.format('resnet18', batch_size, label_proportion))
-        if optimal_acc < test_acc:
             optimal_acc = test_acc
-    print("Best Test Acc with label{}, batch{}: {:.4f}".format(label_proportion, batch_size, optimal_acc))
+            logger.info("==> New best results")
+            torch.save(model.enc.state_dict(), './logs/SimCLR/cifar10/simclr_finetune_resnet18_label{}_batch{}.pt'.format(label_proportion, batch_size))
+
+    logger.info("Best Test Acc with label {} at batch {}: {:.4f}".format(label_proportion, batch_size, optimal_acc))
 
 
 if __name__ == '__main__':
-    #epoch_list = [500, 200, 250, 300, 350, 400, 450, 50, 100, 150]#
-    label_proportions = [1.0]#1.0, 0.01, 0.1, 0.3, 0.5
-    batch_list = [256, 128, 64]#
-    for batch in batch_list:
-        for proportion in label_proportions:
-            finetune(batch_size=batch, label_proportion = proportion)
+    label_proportions = [1.0]#0.01, 0.1, 0.3, 0.5
+    batch_size = [64, 128, 256]
+    for proportion in label_proportions:
+        for batch in batch_size:
+            finetune(batch, proportion)
 
 
